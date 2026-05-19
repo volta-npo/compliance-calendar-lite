@@ -55,23 +55,47 @@ export function calculateDomain(domain, state) {
     }
     return { primary, secondary, completeness, rowScore, approved, insight, releaseReady: completeness >= 80 && rowScore >= 75 };
 }
+export function buildAdvancedDomainModel(domain, state) {
+    const calc = calculateDomain(domain, state);
+    const values = state.values || {};
+    const rows = state.rows || [];
+    const approvedRows = rows.filter((row) => row.approved).length;
+    const getNumber = (id, fallback = 0) => Number(values[id] || fallback);
+    const getText = (id, fallback = '') => String(values[id] || fallback);
+    const cadence = Math.max(1, getNumber('cadence-days', 7));
+    const start = new Date(getText('start-date', '2026-03-10'));
+    const records = Array.from({ length: 12 }, (_, index) => { const due = new Date(start); due.setDate(start.getDate() + index * cadence); return { date: due.toISOString().slice(0, 10), label: rows[index % rows.length]?.label || 'Scheduled work item', owner: getText('owner-reviewer', 'Volta reviewer'), channel: 'Compliance', approval: index < approvedRows ? 'approved' : 'needs-review', ics: `BEGIN:VEVENT\\nSUMMARY:${rows[index % rows.length]?.label || 'Compliance item'}\\nDTSTART;VALUE=DATE:${due.toISOString().slice(0, 10).replace(/-/g, '')}\\nEND:VEVENT` }; });
+    return { model: 'Compliance operations calendar', primaryOutput: 'recurring deadline calendar with evidence owners', dashboards: ['Coverage calendar', 'Approval queue', 'Risk and evidence status'], workflows: ['Jurisdiction intake', 'Recurrence generation', 'Evidence review', 'Owner handoff'], records, automationRules: ['Require owner approval before filing', 'Escalate missing evidence before due date'], enterpriseReadiness: calc.releaseReady && approvedRows >= Math.ceil(rows.length / 2) };
+}
+export function generateDomainSaasPlan(config, domain, state) {
+    const calc = calculateDomain(domain, state);
+    const model = buildAdvancedDomainModel(domain, state);
+    return { product: config.title, category: config.category, idealCustomer: config.persona || domain.sampleClient, planTiers: [{ name: 'Starter', price: 19, audience: 'single owner/operator', limits: '1 active workspace, local exports' }, { name: 'Team', price: 79, audience: 'student pod or small agency', limits: '10 clients, shared review queue, CSV/Markdown packs' }, { name: 'Chapter', price: 249, audience: 'Volta chapter or nonprofit cohort', limits: 'unlimited local workspaces, mentor dashboards, sponsor reporting' }], clientPortal: ['Client intake', 'Evidence locker', 'Approval center', 'Export archive'], analytics: model.dashboards, automations: model.automationRules, roadmap: ['Multi-client workspace switcher', 'Role-based mentor/owner review', 'Template library and reusable snippets', 'Scheduled reminders and status digests', 'Optional backend sync without weakening local-first privacy'], readinessScore: Math.min(100, Math.round(((calc.completeness + calc.rowScore) / 2 + (model.enterpriseReadiness ? 100 : 70)) / 2)) };
+}
 export function generateDomainArtifacts(config, domain, state) {
     const calc = calculateDomain(domain, state);
+    const model = buildAdvancedDomainModel(domain, state);
     const values = Object.fromEntries(domain.fields.map(f => [f.label, state.values[f.id] || '']));
     return domain.artifacts.map((artifact, index) => ({
         id: `artifact-${index + 1}`,
         title: artifact,
-        body: `${artifact} for ${config.title}: ${calc.insight}. Key inputs: ${Object.entries(values).slice(0, 4).map(([k, v]) => `${k}: ${v || 'not set'}`).join('; ')}.`
+        body: `${artifact} for ${config.title}: ${calc.insight}. SaaS-grade output: ${model.primaryOutput}. Key inputs: ${Object.entries(values).slice(0, 4).map(([k, v]) => `${k}: ${v || 'not set'}`).join('; ')}.`
     }));
 }
 export function buildDomainMarkdown(config, domain, state) {
     const calc = calculateDomain(domain, state);
-    const lines = [`# ${config.title} Domain Tool Export`, '', `**Tool:** ${domain.title}`, `**Purpose:** ${domain.purpose}`, `**Readiness:** ${calc.releaseReady ? 'Ready' : 'Needs work'}`, `**Insight:** ${calc.insight}`, '', '## Inputs'];
+    const model = buildAdvancedDomainModel(domain, state);
+    const saas = generateDomainSaasPlan(config, domain, state);
+    const lines = [`# ${config.title} Domain Tool Export`, '', `**Tool:** ${domain.title}`, `**Purpose:** ${domain.purpose}`, `**Readiness:** ${calc.releaseReady ? 'Ready' : 'Needs work'}`, `**Insight:** ${calc.insight}`, `**Advanced model:** ${model.model}`, `**SaaS readiness:** ${saas.readinessScore}/100`, '', '## Inputs'];
     domain.fields.forEach(f => lines.push(`- **${f.label}:** ${state.values[f.id] || 'Not set'}`));
     lines.push('', '## Work Items');
     state.rows.forEach(r => lines.push(`- ${r.approved ? '[x]' : '[ ]'} **${r.label}** — ${r.value || 'No value'} (${r.score}/10)`));
     lines.push('', '## Generated Artifacts');
     generateDomainArtifacts(config, domain, state).forEach(a => lines.push(`- **${a.title}:** ${a.body}`));
+    lines.push('', '## SaaS Expansion Plan');
+    saas.planTiers.forEach(tier => lines.push(`- **${tier.name} ($${tier.price}/mo):** ${tier.audience}; ${tier.limits}`));
+    lines.push('', '## Automation Rules');
+    model.automationRules.forEach(rule => lines.push(`- ${rule}`));
     lines.push('', '## Validation Checks');
     domain.checks.forEach(c => lines.push(`- ${c}`));
     return lines.join('\n');
